@@ -2,16 +2,23 @@ import streamlit as st
 import cv2
 import numpy as np
 from skimage import measure
-from skimage.segmentation import watershed
 import pandas as pd
 from PIL import Image
 
 # Configuração do App
-st.set_page_config(page_title="Smart Cell Analyzer", layout="wide")
-st.title("🔬 Smart Cell Detection with Shape Analysis")
+st.set_page_config(page_title="Precision Cell Analyzer", layout="wide")
+st.title("🔬 Precision Cell Analysis (Micron-scale)")
 
-def smart_cell_detection(image, min_size=50, intensity_thresh=30, circularity_thresh=0.7):
-    """Detecção inteligente considerando forma e intensidade"""
+# Constantes baseadas em sua informação (50μm = 100px)
+MICRONS_PER_PIXEL = 0.5  # 50μm/100px
+MIN_CELL_DIAMETER = 4    # μm
+MAX_CELL_DIAMETER = 14   # μm
+
+def micron_to_pixels(microns):
+    return int(microns / MICRONS_PER_PIXEL)
+
+def detect_cells(image, channel_name):
+    """Detecção precisa baseada em tamanho real e forma"""
     # Converter para escala de cinza
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
@@ -31,135 +38,139 @@ def smart_cell_detection(image, min_size=50, intensity_thresh=30, circularity_th
     # Encontrar contornos
     contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Filtrar por tamanho e circularidade
+    # Filtrar por tamanho real e forma
     valid_cells = []
+    min_area = np.pi * (micron_to_pixels(MIN_CELL_DIAMETER/2))**2
+    max_area = np.pi * (micron_to_pixels(MAX_CELL_DIAMETER/2))**2
+    
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < min_size:
+        if area < min_area or area > max_area:
             continue
             
+        # Verificar circularidade (0.7-1.3 para aceitar ovais)
         perimeter = cv2.arcLength(cnt, True)
         if perimeter == 0:
             continue
             
         circularity = 4 * np.pi * area / (perimeter ** 2)
-        if circularity < circularity_thresh:
+        if circularity < 0.7 or circularity > 1.3:
             continue
             
-        # Verificar intensidade média
+        # Verificar intensidade (mínimo 30% do máximo)
         mask = np.zeros_like(gray)
         cv2.drawContours(mask, [cnt], -1, 255, -1)
         mean_intensity = cv2.mean(gray, mask=mask)[0]
+        max_intensity = np.max(gray)
         
-        if mean_intensity > intensity_thresh:
-            M = cv2.moments(cnt)
-            if M["m00"] > 0:
-                cX = int(M["m10"] / M["m00"])
-                cY = int(M["m01"] / M["m00"])
-                valid_cells.append((cX, cY, cnt))
+        if mean_intensity < 0.3 * max_intensity:
+            continue
+            
+        # Se passou em todos os filtros
+        M = cv2.moments(cnt)
+        if M["m00"] > 0:
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
+            valid_cells.append((cX, cY, cnt))
     
     return valid_cells
 
-# Sidebar para uploads
+# Interface
 with st.sidebar:
     st.header("1. Upload Images")
-    nucleus_img = st.file_uploader("Upload Nucleus (Blue) image", type=["png", "jpg", "tif"])
-    channel1_img = st.file_uploader("Upload Channel 1 (Red) image", type=["png", "jpg", "tif"])
-    channel2_img = st.file_uploader("Upload Channel 2 (Green) image", type=["png", "jpg", "tif"])
+    nucleus_img = st.file_uploader("Nucleus (Blue)", type=["png", "jpg", "tif"])
+    red_img = st.file_uploader("Red Channel", type=["png", "jpg", "tif"])
+    green_img = st.file_uploader("Green Channel", type=["png", "jpg", "tif"])
 
-# Processamento principal
-if nucleus_img is not None:
-    # Carregar imagens
+if nucleus_img:
+    # Processar núcleo
     nucleus = np.array(Image.open(nucleus_img))
     nucleus_bgr = cv2.cvtColor(nucleus, cv2.COLOR_RGB2BGR)
     
-    # Configurações na sidebar
-    with st.sidebar:
-        st.header("2. Detection Settings")
-        min_size = st.slider("Min cell size (px)", 20, 200, 50)
-        intensity_thresh = st.slider("Intensity threshold", 0, 255, 30)
-        circularity = st.slider("Circularity threshold", 0.1, 1.0, 0.7, 0.05)
+    # Detectar células no núcleo
+    nuclei = detect_cells(nucleus_bgr, "blue")
     
-    # Detectar núcleos
-    nuclei = smart_cell_detection(nucleus_bgr, min_size, intensity_thresh, circularity)
-    
-    # Visualização dos núcleos
+    # Visualização
     st.header("Nucleus Detection")
     nucleus_vis = nucleus.copy()
     
     for (cX, cY, cnt) in nuclei:
-        cv2.drawContours(nucleus_vis, [cnt], -1, (255, 0, 0), 1)  # Contorno azul
-        cv2.circle(nucleus_vis, (cX, cY), 2, (0, 255, 255), -1)   # Centro amarelo
+        cv2.drawContours(nucleus_vis, [cnt], -1, (255, 0, 0), 1)
+        cv2.circle(nucleus_vis, (cX, cY), 2, (0, 255, 255), -1)
     
     col1, col2 = st.columns(2)
     with col1:
-        st.image(nucleus, caption="Original Nucleus", use_column_width=True)
+        st.image(nucleus, caption="Original", use_column_width=True)
     with col2:
-        st.image(nucleus_vis, caption="Detected Nuclei", use_column_width=True)
+        st.image(nucleus_vis, caption=f"Detected: {len(nuclei)} cells", use_column_width=True)
     
-    # Análise dos canais adicionais
-    if channel1_img is not None or channel2_img is not None:
+    # Análise dos outros canais
+    if red_img or green_img:
         st.header("Channel Analysis")
         results = []
         
-        # Processar cada canal adicional
-        for idx, (name, img) in enumerate(zip(["Red", "Green"], [channel1_img, channel2_img])):
-            if img is None:
+        for channel, name, color in zip([red_img, green_img], ["Red", "Green"], [(0,0,255), (0,255,0)]):
+            if not channel:
                 continue
                 
-            # Configurações do canal na sidebar
-            with st.sidebar:
-                st.header(f"{name} Settings")
-                ch_intensity = st.slider(f"{name} intensity", 0, 255, 50, key=f"{name}_int")
-                ch_sensitivity = st.slider(f"{name} sensitivity", 1, 100, 30, key=f"{name}_sens")
-            
             # Processar canal
-            channel = np.array(Image.open(img))
-            channel_bgr = cv2.cvtColor(channel, cv2.COLOR_RGB2BGR)
+            channel_arr = np.array(Image.open(channel))
+            channel_bgr = cv2.cvtColor(channel_arr, cv2.COLOR_RGB2BGR)
             
-            # Detectar células positivas
+            # Configurações
+            with st.sidebar:
+                st.subheader(f"{name} Settings")
+                intensity_thresh = st.slider(f"Intensity threshold", 0, 255, 30, key=f"{name}_thresh")
+                min_overlap = st.slider(f"Min overlap (%)", 0, 100, 30, key=f"{name}_overlap")
+            
+            # Detecção de células positivas
             positive_cells = 0
-            channel_vis = channel.copy()
+            channel_vis = channel_arr.copy()
             
             for (cX, cY, cnt) in nuclei:
-                # Criar máscara para a célula atual
+                # Máscara para a célula atual
                 mask = np.zeros_like(channel_bgr[:,:,0])
                 cv2.drawContours(mask, [cnt], -1, 255, -1)
                 
-                # Calcular intensidade média no canal
-                mean_intensity = cv2.mean(channel_bgr[:,:,2 if name=="Red" else 1], mask=mask)[0]
+                # Intensidade média no canal específico
+                if name == "Red":
+                    channel_values = channel_bgr[:,:,2]  # Canal vermelho
+                else:
+                    channel_values = channel_bgr[:,:,1]  # Canal verde
                 
-                if mean_intensity > ch_intensity:
+                mean_intensity = cv2.mean(channel_values, mask=mask)[0]
+                
+                # Se intensidade suficiente e dentro da área celular
+                if mean_intensity > intensity_thresh:
                     positive_cells += 1
-                    cv2.drawContours(channel_vis, [cnt], -1, (255, 0, 0), 1)  # Contorno
-                    cv2.circle(channel_vis, (cX, cY), 2, (255, 255, 0), -1)    # Centro ciano
+                    cv2.drawContours(channel_vis, [cnt], -1, color, 1)
+                    cv2.circle(channel_vis, (cX, cY), 2, (255, 255, 0), -1)
             
-            # Mostrar resultados
+            # Resultados
             cols = st.columns(2)
             with cols[0]:
-                st.image(channel, caption=f"Original {name}", use_column_width=True)
+                st.image(channel_arr, caption=f"Original {name}", use_column_width=True)
             with cols[1]:
-                st.image(channel_vis, caption=f"{name} Positive Cells", use_column_width=True)
+                st.image(channel_vis, caption=f"{name} Positives: {positive_cells}", use_column_width=True)
             
             results.append({
                 "Channel": name,
                 "Positive Cells": positive_cells,
                 "Total Cells": len(nuclei),
-                "Percentage": (positive_cells / len(nuclei)) * 100 if len(nuclei) > 0 else 0
+                "Percentage": (positive_cells/len(nuclei))*100 if len(nuclei)>0 else 0
             })
         
-        # Resultados quantitativos
+        # Tabela de resultados
         st.header("Quantitative Results")
-        if results:
-            df = pd.DataFrame(results)
-            st.dataframe(df, hide_index=True)
-            
-            st.download_button(
-                "Download Results",
-                df.to_csv(index=False),
-                "cell_analysis.csv",
-                mime="text/csv"
-            )
+        df = pd.DataFrame(results)
+        st.dataframe(df, hide_index=True)
+        
+        st.download_button(
+            "Download Results",
+            df.to_csv(index=False),
+            "cell_counts.csv",
+            mime="text/csv"
+        )
 
 else:
-    st.info("Please upload at least the nucleus image to start analysis")
+    st.info("Please upload at least the nucleus image")
