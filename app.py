@@ -6,15 +6,15 @@ import pandas as pd
 from PIL import Image
 
 # Configuração do App
-st.set_page_config(page_title="Cell Analyzer Pro", layout="wide")
-st.title("🔬 Advanced Cell Quantification")
+st.set_page_config(page_title="Multi-Color Cell Analyzer", layout="wide")
+st.title("🔬 Multi-Color Cell Quantification")
 
-def process_color(img_bgr, lower, upper, min_size, dilation=0):
-    """Processa uma cor específica com limiarização e limpeza"""
+def apply_color_mask(img_bgr, lower, upper, min_size=20, dilation=1):
+    """Aplica máscara de cor com pós-processamento"""
     mask = cv2.inRange(img_bgr, lower, upper)
     
     # Operações morfológicas
-    kernel = np.ones((3,3), np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
     
@@ -32,6 +32,12 @@ def process_color(img_bgr, lower, upper, min_size, dilation=0):
             
     return final_mask
 
+def create_colored_mask(mask, color_bgr):
+    """Cria imagem colorida a partir da máscara"""
+    colored = np.zeros((*mask.shape, 3), dtype=np.uint8)
+    colored[mask > 0] = color_bgr
+    return colored
+
 # Upload da imagem
 uploaded_file = st.file_uploader("Upload fluorescence image", type=["png", "jpg", "tif"])
 
@@ -47,43 +53,41 @@ if uploaded_file is not None:
 
         # Definições de cores (BGR)
         colors = {
-            "Blue (Nucleus)": {
-                "lower": [100, 0, 0],
+            "Blue": {
+                "lower": [120, 0, 0],   # BGR - Azul
                 "upper": [255, 50, 50],
-                "display": [255, 0, 0]  # BGR para exibição
+                "display": [255, 0, 0]  # Vermelho para exibição (contraste)
             },
             "Red": {
-                "lower": [0, 0, 100],
+                "lower": [0, 0, 120],   # BGR - Vermelho
                 "upper": [50, 50, 255],
-                "display": [0, 0, 255]
+                "display": [0, 0, 255]  # Vermelho puro
             },
             "Green": {
-                "lower": [0, 100, 0],
+                "lower": [0, 120, 0],  # BGR - Verde
                 "upper": [50, 255, 50],
-                "display": [0, 255, 0]
-            },
-            "White": {
-                "lower": [150, 150, 150],
-                "upper": [255, 255, 255],
-                "display": [255, 255, 255]
+                "display": [0, 255, 0]  # Verde puro
             }
         }
 
         # Controles para cada cor
-        st.sidebar.header("Color Settings")
+        st.sidebar.header("Color Detection Settings")
         
-        # Processar núcleo (azul) primeiro
-        blue_settings = st.sidebar.expander("🔵 Nucleus (Blue) Settings")
+        # Configurações do Azul (Núcleo)
+        blue_settings = st.sidebar.expander("🔵 Blue (Nucleus) Settings")
         with blue_settings:
-            blue_lower = blue_settings.slider("Blue lower threshold", 0, 255, 100, key="blue_lower")
+            blue_lower = blue_settings.slider("Blue lower threshold", 0, 255, 120, key="blue_lower")
             blue_upper = blue_settings.slider("Blue upper threshold", 0, 255, 255, key="blue_upper")
             blue_min = blue_settings.slider("Blue min size", 10, 200, 30, key="blue_min")
+            blue_dilation = blue_settings.slider("Blue dilation", 0, 5, 1, key="blue_dil")
         
-        blue_mask = process_color(
+        # Processar núcleo (azul)
+        blue_mask = apply_color_mask(
             img_bgr,
             np.array([blue_lower, 0, 0]),
             np.array([blue_upper, 50, 50]),
-            blue_min
+            blue_min,
+            blue_dilation
         )
         
         # Contar núcleos
@@ -93,29 +97,29 @@ if uploaded_file is not None:
 
         # Processar outras cores
         results = []
-        for color_name in ["Red", "Green", "White"]:
-            settings = st.sidebar.expander(f"{'🟢' if color_name == 'Green' else '🔴' if color_name == 'Red' else '⚪'} {color_name} Settings")
+        color_masks = {"Blue": blue_mask}
+        
+        for color_name in ["Red", "Green"]:
+            settings = st.sidebar.expander(f"{'🟢' if color_name == 'Green' else '🔴'} {color_name} Settings")
             
             with settings:
                 lower = settings.slider(f"{color_name} lower", 0, 255, colors[color_name]["lower"][0], key=f"{color_name}_lower")
                 upper = settings.slider(f"{color_name} upper", 0, 255, colors[color_name]["upper"][0], key=f"{color_name}_upper")
                 min_size = settings.slider(f"{color_name} min size", 10, 100, 20, key=f"{color_name}_min")
                 dilation = settings.slider(f"{color_name} dilation", 0, 5, 1, key=f"{color_name}_dil")
+                require_nucleus = settings.checkbox(f"Require nucleus overlap", value=True, key=f"{color_name}_nuc")
             
-            mask = process_color(
+            # Criar máscara
+            mask = apply_color_mask(
                 img_bgr,
-                np.array([lower if color_name == "Blue (Nucleus)" else colors[color_name]["lower"][0], 
-                          colors[color_name]["lower"][1], 
-                          colors[color_name]["lower"][2]]),
-                np.array([upper if color_name == "Blue (Nucleus)" else colors[color_name]["upper"][0], 
-                          colors[color_name]["upper"][1], 
-                          colors[color_name]["upper"][2]]),
+                np.array([colors[color_name]["lower"][0], colors[color_name]["lower"][1], colors[color_name]["lower"][2]]),
+                np.array([upper, colors[color_name]["upper"][1], colors[color_name]["upper"][2]]),
                 min_size,
                 dilation
             )
             
-            # Sobrepor com núcleo
-            if color_name != "Blue (Nucleus)":
+            # Sobrepor com núcleo se necessário
+            if require_nucleus:
                 mask = cv2.bitwise_and(mask, blue_mask)
             
             # Contar células
@@ -124,111 +128,147 @@ if uploaded_file is not None:
             count = len([prop for prop in props if prop.area >= min_size])
             percentage = (count / total_cells * 100) if total_cells > 0 else 0
             
-            # Criar visualização
-            display_img = np.zeros_like(img_bgr)
-            display_img[mask > 0] = colors[color_name]["display"]
-            display_img = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
-            
-            # Overlay
-            overlay = img_array.copy()
-            overlay[mask > 0] = [255, 255, 0]  # Amarelo para destacar
-            
+            # Armazenar resultados
+            color_masks[color_name] = mask
             results.append({
                 "Color": color_name,
                 "Count": count,
                 "Percentage": percentage,
-                "Image": display_img,
-                "Overlay": overlay
+                "Mask": mask
             })
 
-        # Mostrar resultados
+        # Visualização
         st.header("Color Detection Results")
         
-        # Mostrar núcleo primeiro
-        blue_display = np.zeros_like(img_bgr)
-        blue_display[blue_mask > 0] = colors["Blue (Nucleus)"]["display"]
-        blue_display = cv2.cvtColor(blue_display, cv2.COLOR_BGR2RGB)
+        # 1. Mostrar cada cor individualmente
+        st.subheader("Individual Color Channels")
+        cols = st.columns(3)
         
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(blue_display, caption=f"Blue Nucleus ({total_cells} cells)", use_column_width=True)
-        with col2:
-            blue_overlay = img_array.copy()
-            blue_overlay[blue_mask > 0] = [255, 255, 0]
-            st.image(blue_overlay, caption="Nucleus Overlay", use_column_width=True)
+        # Azul (Núcleo)
+        blue_display = create_colored_mask(blue_mask, colors["Blue"]["display"])
+        with cols[0]:
+            st.image(
+                cv2.cvtColor(blue_display, cv2.COLOR_BGR2RGB),
+                caption=f"Blue Nucleus ({total_cells} cells)",
+                use_column_width=True
+            )
         
-        # Mostrar outras cores
-        for result in results:
-            st.subheader(f"{result['Color']} Detection")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.image(result["Image"], 
-                        caption=f"{result['Color']}: {result['Count']} cells ({result['Percentage']:.1f}%)", 
-                        use_column_width=True)
-            
-            with col2:
-                st.image(result["Overlay"], 
-                        caption=f"{result['Color']} Overlay", 
-                        use_column_width=True)
+        # Vermelho e Verde
+        for idx, color_name in enumerate(["Red", "Green"], 1):
+            if color_name in color_masks:
+                color_display = create_colored_mask(color_masks[color_name], colors[color_name]["display"])
+                with cols[idx]:
+                    st.image(
+                        cv2.cvtColor(color_display, cv2.COLOR_BGR2RGB),
+                        caption=f"{color_name}: {results[idx-1]['Count']} cells ({results[idx-1]['Percentage']:.1f}%)",
+                        use_column_width=True
+                    )
 
-        # Combinações de cores
-        st.header("Color Combinations")
+        # 2. Mostrar combinações de cores
+        st.subheader("Color Combinations")
         
-        if len(results) >= 2:
-            # Red + Green = Yellow
-            red_mask = process_color(img_bgr, 
-                                   np.array(colors["Red"]["lower"]), 
-                                   np.array(colors["Red"]["upper"]), 
-                                   10)
-            green_mask = process_color(img_bgr, 
-                                     np.array(colors["Green"]["lower"]), 
-                                     np.array(colors["Green"]["upper"]), 
-                                     10)
-            
-            yellow_mask = cv2.bitwise_and(red_mask, green_mask)
-            yellow_mask = cv2.bitwise_and(yellow_mask, blue_mask)
-            
-            yellow_display = np.zeros_like(img_bgr)
-            yellow_display[yellow_mask > 0] = [0, 255, 255]  # Amarelo em BGR
-            yellow_display = cv2.cvtColor(yellow_display, cv2.COLOR_BGR2RGB)
-            
-            yellow_labels = measure.label(yellow_mask)
-            yellow_count = len(measure.regionprops(yellow_labels))
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.image(yellow_display, caption=f"Red+Green (Yellow): {yellow_count} cells", use_column_width=True)
-            with col2:
-                yellow_overlay = img_array.copy()
-                yellow_overlay[yellow_mask > 0] = [255, 0, 255]  # Magenta para destacar
-                st.image(yellow_overlay, caption="Yellow Cells Overlay", use_column_width=True)
-
-        # Resultados quantitativos
-        st.header("Quantitative Analysis")
-        
-        data = {
-            "Population": ["Total Nuclei", "Red", "Green", "White", "Red+Green"],
-            "Count": [total_cells, 
-                     results[0]["Count"] if len(results) > 0 else 0,
-                     results[1]["Count"] if len(results) > 1 else 0,
-                     results[2]["Count"] if len(results) > 2 else 0,
-                     yellow_count if len(results) >= 2 else 0],
-            "Percentage": [100.0,
-                          results[0]["Percentage"] if len(results) > 0 else 0,
-                          results[1]["Percentage"] if len(results) > 1 else 0,
-                          results[2]["Percentage"] if len(results) > 2 else 0,
-                          (yellow_count / total_cells * 100) if total_cells > 0 and len(results) >= 2 else 0]
+        # Criar combinações
+        combo_masks = {
+            "Blue+Red": cv2.bitwise_and(color_masks["Blue"], color_masks["Red"]),
+            "Blue+Green": cv2.bitwise_and(color_masks["Blue"], color_masks["Green"]),
+            "Red+Green": cv2.bitwise_and(color_masks["Red"], color_masks["Green"]),
+            "All Colors": cv2.bitwise_and(cv2.bitwise_and(color_masks["Blue"], color_masks["Red"]), color_masks["Green"])
         }
         
-        df = pd.DataFrame(data)
+        # Cores para exibição das combinações
+        combo_colors = {
+            "Blue+Red": [0, 0, 255],    # Vermelho
+            "Blue+Green": [0, 255, 0],   # Verde
+            "Red+Green": [0, 255, 255],  # Amarelo
+            "All Colors": [255, 255, 255] # Branco
+        }
+        
+        # Mostrar combinações
+        combo_cols = st.columns(4)
+        combo_results = []
+        
+        for idx, (combo_name, combo_mask) in enumerate(combo_masks.items()):
+            # Contar células na combinação
+            labels = measure.label(combo_mask)
+            props = measure.regionprops(labels)
+            combo_count = len([prop for prop in props if prop.area >= 20])
+            
+            # Criar visualização
+            combo_display = create_colored_mask(combo_mask, combo_colors[combo_name])
+            
+            with combo_cols[idx % 4]:
+                st.image(
+                    cv2.cvtColor(combo_display, cv2.COLOR_BGR2RGB),
+                    caption=f"{combo_name}: {combo_count} cells",
+                    use_column_width=True
+                )
+            
+            combo_results.append({
+                "Combination": combo_name,
+                "Count": combo_count,
+                "Percentage": (combo_count / total_cells * 100) if total_cells > 0 else 0
+            })
+
+        # 3. Mostrar overlay completo
+        st.subheader("Complete Overlay")
+        
+        # Criar overlay combinando todas as cores
+        overlay = np.zeros_like(img_bgr)
+        
+        # Adicionar cada cor ao overlay
+        overlay[color_masks["Blue"] > 0] = colors["Blue"]["display"]
+        if "Red" in color_masks:
+            overlay[color_masks["Red"] > 0] = colors["Red"]["display"]
+        if "Green" in color_masks:
+            overlay[color_masks["Green"] > 0] = colors["Green"]["display"]
+        
+        # Adicionar combinações (sobrescrevendo as cores individuais)
+        for combo_name, combo_mask in combo_masks.items():
+            overlay[combo_mask > 0] = combo_colors[combo_name]
+        
+        st.image(
+            cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB),
+            caption="Complete Color Overlay",
+            use_column_width=True
+        )
+
+        # 4. Resultados quantitativos
+        st.header("Quantitative Results")
+        
+        # Preparar dados para tabela
+        table_data = []
+        
+        # Cores individuais
+        for result in results:
+            table_data.append({
+                "Population": result["Color"],
+                "Cell Count": result["Count"],
+                "Percentage": result["Percentage"]
+            })
+        
+        # Combinações
+        for combo in combo_results:
+            table_data.append({
+                "Population": combo["Combination"],
+                "Cell Count": combo["Count"],
+                "Percentage": combo["Percentage"]
+            })
+        
+        # Adicionar total de núcleos
+        table_data.insert(0, {
+            "Population": "Total Nuclei (Blue)",
+            "Cell Count": total_cells,
+            "Percentage": 100.0
+        })
+        
+        df = pd.DataFrame(table_data)
         st.dataframe(df, hide_index=True)
         
-        # Exportar
+        # Exportar dados
         st.download_button(
-            "Download Results",
+            "Download Results (CSV)",
             df.to_csv(index=False),
-            "cell_counts.csv",
+            "cell_quantification_results.csv",
             mime="text/csv"
         )
 
