@@ -6,8 +6,8 @@ import pandas as pd
 from PIL import Image
 
 # Configuração do App
-st.set_page_config(page_title="Multi-Color Cell Analyzer", layout="wide")
-st.title("🔬 Multi-Color Cell Quantification")
+st.set_page_config(page_title="Advanced Cell Analyzer", layout="wide")
+st.title("🔬 Advanced Multi-Color Cell Quantification")
 
 def apply_color_mask(img_bgr, lower, upper, min_size=20, dilation=1):
     """Aplica máscara de cor com pós-processamento"""
@@ -32,12 +32,6 @@ def apply_color_mask(img_bgr, lower, upper, min_size=20, dilation=1):
             
     return final_mask
 
-def create_colored_mask(mask, color_bgr):
-    """Cria imagem colorida a partir da máscara"""
-    colored = np.zeros((*mask.shape, 3), dtype=np.uint8)
-    colored[mask > 0] = color_bgr
-    return colored
-
 # Upload da imagem
 uploaded_file = st.file_uploader("Upload fluorescence image", type=["png", "jpg", "tif"])
 
@@ -54,19 +48,19 @@ if uploaded_file is not None:
         # Definições de cores (BGR)
         colors = {
             "Blue": {
-                "lower": [120, 0, 0],   # BGR - Azul
+                "lower": [120, 0, 0],
                 "upper": [255, 50, 50],
                 "display": [255, 0, 0]  # Vermelho para exibição (contraste)
             },
             "Red": {
-                "lower": [0, 0, 120],   # BGR - Vermelho
+                "lower": [0, 0, 120],
                 "upper": [50, 50, 255],
                 "display": [0, 0, 255]  # Vermelho puro
             },
             "Green": {
-                "lower": [0, 120, 0],  # BGR - Verde
+                "lower": [0, 120, 0],
                 "upper": [50, 255, 50],
-                "display": [0, 255, 0]  # Verde puro
+                "display": [0, 255, 0]   # Verde puro
             }
         }
 
@@ -112,7 +106,7 @@ if uploaded_file is not None:
             # Criar máscara
             mask = apply_color_mask(
                 img_bgr,
-                np.array([colors[color_name]["lower"][0], colors[color_name]["lower"][1], colors[color_name]["lower"][2]]),
+                np.array([lower, colors[color_name]["lower"][1], colors[color_name]["lower"][2]]),
                 np.array([upper, colors[color_name]["upper"][1], colors[color_name]["upper"][2]]),
                 min_size,
                 dilation
@@ -140,12 +134,13 @@ if uploaded_file is not None:
         # Visualização
         st.header("Color Detection Results")
         
-        # 1. Mostrar cada cor individualmente
+        # 1. Mostrar cada cor individualmente (convertendo para RGB antes de exibir)
         st.subheader("Individual Color Channels")
         cols = st.columns(3)
         
-        # Azul (Núcleo)
-        blue_display = create_colored_mask(blue_mask, colors["Blue"]["display"])
+        # Azul (Núcleo) - exibido em vermelho para contraste
+        blue_display = np.zeros_like(img_bgr)
+        blue_display[blue_mask > 0] = colors["Blue"]["display"]
         with cols[0]:
             st.image(
                 cv2.cvtColor(blue_display, cv2.COLOR_BGR2RGB),
@@ -156,7 +151,8 @@ if uploaded_file is not None:
         # Vermelho e Verde
         for idx, color_name in enumerate(["Red", "Green"], 1):
             if color_name in color_masks:
-                color_display = create_colored_mask(color_masks[color_name], colors[color_name]["display"])
+                color_display = np.zeros_like(img_bgr)
+                color_display[color_masks[color_name] > 0] = colors[color_name]["display"]
                 with cols[idx]:
                     st.image(
                         cv2.cvtColor(color_display, cv2.COLOR_BGR2RGB),
@@ -175,7 +171,7 @@ if uploaded_file is not None:
             "All Colors": cv2.bitwise_and(cv2.bitwise_and(color_masks["Blue"], color_masks["Red"]), color_masks["Green"])
         }
         
-        # Cores para exibição das combinações
+        # Cores para exibição das combinações (em BGR)
         combo_colors = {
             "Blue+Red": [0, 0, 255],    # Vermelho
             "Blue+Green": [0, 255, 0],   # Verde
@@ -194,7 +190,8 @@ if uploaded_file is not None:
             combo_count = len([prop for prop in props if prop.area >= 20])
             
             # Criar visualização
-            combo_display = create_colored_mask(combo_mask, combo_colors[combo_name])
+            combo_display = np.zeros_like(img_bgr)
+            combo_display[combo_mask > 0] = combo_colors[combo_name]
             
             with combo_cols[idx % 4]:
                 st.image(
@@ -212,10 +209,10 @@ if uploaded_file is not None:
         # 3. Mostrar overlay completo
         st.subheader("Complete Overlay")
         
-        # Criar overlay combinando todas as cores
+        # Criar overlay combinando todas as cores (em BGR)
         overlay = np.zeros_like(img_bgr)
         
-        # Adicionar cada cor ao overlay
+        # Adicionar cada cor ao overlay (usando cores de exibição)
         overlay[color_masks["Blue"] > 0] = colors["Blue"]["display"]
         if "Red" in color_masks:
             overlay[color_masks["Red"] > 0] = colors["Red"]["display"]
@@ -226,6 +223,7 @@ if uploaded_file is not None:
         for combo_name, combo_mask in combo_masks.items():
             overlay[combo_mask > 0] = combo_colors[combo_name]
         
+        # Converter para RGB antes de exibir
         st.image(
             cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB),
             caption="Complete Color Overlay",
