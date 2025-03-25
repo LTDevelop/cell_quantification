@@ -6,30 +6,13 @@ import pandas as pd
 from PIL import Image
 
 # Configuração do App
-st.set_page_config(page_title="Precision Cell Analyzer", layout="wide")
-st.title("🔬 Precision Cell Analysis (Micron-scale)")
+st.set_page_config(page_title="Precision Cell Counter", layout="wide")
+st.title("🔬 Precision Cell Counter")
 
-# Constantes baseadas em sua informação (50μm = 100px)
-MICRONS_PER_PIXEL = 0.5  # 50μm/100px
-MIN_CELL_DIAMETER = 4    # μm
-MAX_CELL_DIAMETER = 14   # μm
-
-def micron_to_pixels(microns):
-    return int(microns / MICRONS_PER_PIXEL)
-
-def detect_cells(image, channel_name):
-    """Detecção precisa baseada em tamanho real e forma"""
-    # Converter para escala de cinza
+def detect_nuclei(image, min_size=50, max_size=500, threshold=30):
+    """Detecta núcleos com base em tamanho e intensidade"""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
-    # Pré-processamento avançado
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    equalized = cv2.equalizeHist(blurred)
-    
-    # Threshold adaptativo
-    thresh = cv2.adaptiveThreshold(equalized, 255, 
-                                  cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                  cv2.THRESH_BINARY_INV, 11, 2)
+    _, thresh = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
     
     # Operações morfológicas
     kernel = np.ones((3,3), np.uint8)
@@ -38,42 +21,18 @@ def detect_cells(image, channel_name):
     # Encontrar contornos
     contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Filtrar por tamanho real e forma
-    valid_cells = []
-    min_area = np.pi * (micron_to_pixels(MIN_CELL_DIAMETER/2))**2
-    max_area = np.pi * (micron_to_pixels(MAX_CELL_DIAMETER/2))**2
-    
+    # Filtrar por tamanho
+    nuclei = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < min_area or area > max_area:
-            continue
-            
-        # Verificar circularidade (0.7-1.3 para aceitar ovais)
-        perimeter = cv2.arcLength(cnt, True)
-        if perimeter == 0:
-            continue
-            
-        circularity = 4 * np.pi * area / (perimeter ** 2)
-        if circularity < 0.7 or circularity > 1.3:
-            continue
-            
-        # Verificar intensidade (mínimo 30% do máximo)
-        mask = np.zeros_like(gray)
-        cv2.drawContours(mask, [cnt], -1, 255, -1)
-        mean_intensity = cv2.mean(gray, mask=mask)[0]
-        max_intensity = np.max(gray)
-        
-        if mean_intensity < 0.3 * max_intensity:
-            continue
-            
-        # Se passou em todos os filtros
-        M = cv2.moments(cnt)
-        if M["m00"] > 0:
-            cX = int(M["m10"] / M["m00"])
-            cY = int(M["m01"] / M["m00"])
-            valid_cells.append((cX, cY, cnt))
+        if min_size < area < max_size:
+            M = cv2.moments(cnt)
+            if M["m00"] > 0:
+                cX = int(M["m10"] / M["m00"])
+                cY = int(M["m01"] / M["m00"])
+                nuclei.append((cX, cY, cnt))
     
-    return valid_cells
+    return nuclei
 
 # Interface
 with st.sidebar:
@@ -82,27 +41,34 @@ with st.sidebar:
     red_img = st.file_uploader("Red Channel", type=["png", "jpg", "tif"])
     green_img = st.file_uploader("Green Channel", type=["png", "jpg", "tif"])
 
+# Parâmetros do núcleo
+with st.sidebar:
+    st.header("2. Nucleus Settings")
+    min_size = st.slider("Min nucleus size (px)", 10, 200, 50)
+    max_size = st.slider("Max nucleus size (px)", 100, 1000, 500)
+    blue_thresh = st.slider("Blue threshold", 0, 255, 30)
+
 if nucleus_img:
     # Processar núcleo
     nucleus = np.array(Image.open(nucleus_img))
     nucleus_bgr = cv2.cvtColor(nucleus, cv2.COLOR_RGB2BGR)
     
-    # Detectar células no núcleo
-    nuclei = detect_cells(nucleus_bgr, "blue")
+    # Detectar núcleos
+    nuclei = detect_nuclei(nucleus_bgr, min_size, max_size, blue_thresh)
     
     # Visualização
     st.header("Nucleus Detection")
     nucleus_vis = nucleus.copy()
     
     for (cX, cY, cnt) in nuclei:
-        cv2.drawContours(nucleus_vis, [cnt], -1, (255, 0, 0), 1)
-        cv2.circle(nucleus_vis, (cX, cY), 2, (0, 255, 255), -1)
+        cv2.drawContours(nucleus_vis, [cnt], -1, (255, 0, 0), 1)  # Contorno azul
+        cv2.circle(nucleus_vis, (cX, cY), 2, (0, 255, 255), -1)   # Centro amarelo
     
     col1, col2 = st.columns(2)
     with col1:
         st.image(nucleus, caption="Original", use_column_width=True)
     with col2:
-        st.image(nucleus_vis, caption=f"Detected: {len(nuclei)} cells", use_column_width=True)
+        st.image(nucleus_vis, caption=f"Detected: {len(nuclei)} nuclei", use_column_width=True)
     
     # Análise dos outros canais
     if red_img or green_img:
@@ -113,17 +79,16 @@ if nucleus_img:
             if not channel:
                 continue
                 
+            # Configurações do canal
+            with st.sidebar:
+                st.subheader(f"{name} Settings")
+                ch_thresh = st.slider(f"{name} threshold", 0, 255, 30, key=f"{name}_thresh")
+            
             # Processar canal
             channel_arr = np.array(Image.open(channel))
             channel_bgr = cv2.cvtColor(channel_arr, cv2.COLOR_RGB2BGR)
             
-            # Configurações
-            with st.sidebar:
-                st.subheader(f"{name} Settings")
-                intensity_thresh = st.slider(f"Intensity threshold", 0, 255, 30, key=f"{name}_thresh")
-                min_overlap = st.slider(f"Min overlap (%)", 0, 100, 30, key=f"{name}_overlap")
-            
-            # Detecção de células positivas
+            # Detectar células positivas
             positive_cells = 0
             channel_vis = channel_arr.copy()
             
@@ -132,16 +97,15 @@ if nucleus_img:
                 mask = np.zeros_like(channel_bgr[:,:,0])
                 cv2.drawContours(mask, [cnt], -1, 255, -1)
                 
-                # Intensidade média no canal específico
+                # Intensidade média no canal
                 if name == "Red":
-                    channel_values = channel_bgr[:,:,2]  # Canal vermelho
+                    ch_values = channel_bgr[:,:,2]  # Canal vermelho
                 else:
-                    channel_values = channel_bgr[:,:,1]  # Canal verde
+                    ch_values = channel_bgr[:,:,1]  # Canal verde
                 
-                mean_intensity = cv2.mean(channel_values, mask=mask)[0]
+                mean_intensity = cv2.mean(ch_values, mask=mask)[0]
                 
-                # Se intensidade suficiente e dentro da área celular
-                if mean_intensity > intensity_thresh:
+                if mean_intensity > ch_thresh:
                     positive_cells += 1
                     cv2.drawContours(channel_vis, [cnt], -1, color, 1)
                     cv2.circle(channel_vis, (cX, cY), 2, (255, 255, 0), -1)
