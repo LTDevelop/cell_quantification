@@ -4,113 +4,112 @@ import numpy as np
 from skimage import measure
 import pandas as pd
 from PIL import Image
-import sys
 
-# Configuração da página
-st.set_page_config(page_title="Cell Quantifier", layout="wide")
-
-# Verificador de versões (debug)
-def show_package_versions():
-    st.sidebar.write("**Versões dos pacotes:**")
-    st.sidebar.write(f"- Python: {sys.version.split()[0]}")
-    st.sidebar.write(f"- OpenCV: {cv2.__version__}")
-    st.sidebar.write(f"- Numpy: {np.__version__}")
-
-show_package_versions()
-
-# Título do app
+# Configurações do App
+st.set_page_config(page_title="Cell Color Quantifier", layout="wide")
 st.title("🔬 Quantificador de Células Multicoloridas")
 
 # 1. Upload da Imagem
-uploaded_file = st.file_uploader("Carregue uma imagem de imunofluorescência", type=["png", "jpg", "tif", "tiff"])
+uploaded_file = st.file_uploader("Carregue uma imagem de imunofluorescência (RGB)", type=["png", "jpg", "tif"])
 
 if uploaded_file is not None:
-    try:
-        # 2. Carregar imagem
-        img = Image.open(uploaded_file)
-        img_array = np.array(img)
-        
-        # Conversão para BGR (OpenCV)
-        if img_array.shape[2] == 3:  # Se for RGB
-            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-        elif img_array.shape[2] == 4:  # Se for RGBA
-            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+    # 2. Processamento Inicial
+    img = np.array(Image.open(uploaded_file))
+    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # Converte para BGR (OpenCV)
+    
+    # 3. Controles Interativos
+    st.sidebar.header("Configurações")
+    color_options = ["Vermelho", "Verde", "Azul"]
+    selected_colors = st.sidebar.multiselect("Cores para analisar", color_options, default=color_options)
+    
+    threshold = st.sidebar.slider("Limiar de intensidade", 0, 255, 50)
+    min_cell_size = st.sidebar.slider("Tamanho mínimo da célula (pixels)", 10, 200, 30)
 
-        st.image(img_array, caption="Imagem Original (BGR)", use_column_width=True, channels="BGR")
+    # 4. Dicionário de Cores (BGR)
+    color_dict = {
+        "Vermelho": {'lower': [0, 0, 200], 'upper': [100, 100, 255]},
+        "Verde": {'lower': [0, 200, 0], 'upper': [100, 255, 100]},
+        "Azul": {'lower': [200, 0, 0], 'upper': [255, 100, 100]}
+    }
 
-        # 3. Configurações de Cores
-        st.sidebar.header("Configurações")
-        colors = {
-            "Vermelho": [0, 0, 255],  # BGR!
-            "Verde": [0, 255, 0],
-            "Azul": [255, 0, 0],
-            "Amarelo": [0, 255, 255],
-            "Magenta": [255, 0, 255]
-        }
-        
-        selected_colors = st.sidebar.multiselect(
-            "Cores para quantificar",
-            list(colors.keys()),
-            default=["Vermelho", "Verde"]
-        )
+    # 5. Criar máscaras para cada cor
+    masks = {}
+    for color in selected_colors:
+        lower = np.array(color_dict[color]['lower'], dtype=np.uint8)
+        upper = np.array(color_dict[color]['upper'], dtype=np.uint8)
+        masks[color] = cv2.inRange(img_bgr, lower, upper)
 
-        color_tolerance = st.sidebar.slider("Tolerância de Cor", 0, 100, 20)
-        min_cell_size = st.sidebar.slider("Tamanho mínimo da célula (pixels)", 10, 100, 30)
+    # 6. Identificar combinações de cores
+    combinations = {
+        "Vermelho": masks.get("Vermelho", np.zeros_like(masks[selected_colors[0]])),
+        "Verde": masks.get("Verde", np.zeros_like(masks[selected_colors[0]])),
+        "Azul": masks.get("Azul", np.zeros_like(masks[selected_colors[0]]))
+    }
 
-        # 4. Processamento para cada cor
-        results = []
-        for color_name in selected_colors:
-            target_color = np.array(colors[color_name], dtype=np.uint8)
-            
-            # Definir limites de cor com tolerância
-            lower_bound = np.clip(target_color - color_tolerance, 0, 255).astype(np.uint8)
-            upper_bound = np.clip(target_color + color_tolerance, 0, 255).astype(np.uint8)
-            
-            # Criar máscara
-            mask = cv2.inRange(img_array, lower_bound, upper_bound)
-            
-            # Remover pequenos ruídos
-            kernel = np.ones((3,3), np.uint8)
-            cleaned_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            
-            # Contar células
-            labels = measure.label(cleaned_mask)
+    # Combinações:
+    combinations["Vermelho+Verde"] = cv2.bitwise_and(combinations["Vermelho"], combinations["Verde"])
+    combinations["Vermelho+Azul"] = cv2.bitwise_and(combinations["Vermelho"], combinations["Azul"])
+    combinations["Verde+Azul"] = cv2.bitwise_and(combinations["Verde"], combinations["Azul"])
+    combinations["Todas"] = cv2.bitwise_and(combinations["Vermelho+Verde"], combinations["Azul"])
+
+    # 7. Contagem de células por combinação
+    results = []
+    for name, mask in combinations.items():
+        if name in selected_colors or any(c in name for c in selected_colors):
+            labels = measure.label(mask)
             props = measure.regionprops(labels)
-            
-            # Filtrar por tamanho
             cells = [prop for prop in props if prop.area >= min_cell_size]
             
+            # Criar imagem de overlay
+            overlay = img.copy()
+            overlay[mask > 0] = [255, 255, 255]  # Destaca as células
+            
             results.append({
-                "Cor": color_name,
-                "Células": len(cells),
-                "Máscara": cleaned_mask
+                "Combinação": name,
+                "Contagem": len(cells),
+                "Máscara": mask,
+                "Overlay": overlay
             })
 
-        # 5. Mostrar resultados
-        st.header("Resultados")
-        
-        # Tabela
-        df = pd.DataFrame(results)
-        st.dataframe(df[["Cor", "Células"]], hide_index=True)
-        
-        # Visualização
-        st.subheader("Máscaras Geradas")
-        cols = st.columns(len(selected_colors))
-        for idx, color_name in enumerate(selected_colors):
-            with cols[idx]:
-                st.image(
-                    results[idx]["Máscara"], 
-                    caption=f"{color_name}: {results[idx]['Células']} células",
-                    use_column_width=True
-                )
+    # 8. Exibir Resultados
+    st.header("Resultados por Combinação de Cores")
+    
+    # Tabela
+    df = pd.DataFrame([{'Combinação': r['Combinação'], 'Células': r['Contagem']} for r in results])
+    st.dataframe(df, hide_index=True)
 
-        # Exportar
-        st.download_button(
-            "Baixar Resultados (CSV)",
-            df.to_csv(index=False),
-            "resultados_celulas.csv"
-        )
+    # Visualização
+    st.subheader("Visualização das Combinações")
+    cols = st.columns(3)
+    for idx, result in enumerate(results):
+        with cols[idx % 3]:
+            st.image(
+                result['Overlay'],
+                caption=f"{result['Combinação']}: {result['Contagem']} células",
+                use_column_width=True
+            )
+            if (idx + 1) % 3 == 0 and (idx + 1) < len(results):
+                cols = st.columns(3)  # Nova linha após 3 imagens
 
-    except Exception as e:
-        st.error(f"Erro ao processar a imagem: {str(e)}")
-        st.stop()
+    # 9. Exportar dados
+    st.download_button(
+        "Baixar Resultados (CSV)",
+        df.to_csv(index=False, encoding='utf-8-sig'),
+        "contagem_celulas.csv",
+        mime="text/csv"
+    )
+
+    # 10. Visualização Avançada (opcional)
+    st.subheader("Mapa de Cores Combinadas")
+    color_map = np.zeros_like(img_bgr)
+    
+    # Atribui cores às combinações
+    color_map[combinations["Vermelho"] > 0] = [0, 0, 255]  # Vermelho
+    color_map[combinations["Verde"] > 0] = [0, 255, 0]     # Verde
+    color_map[combinations["Azul"] > 0] = [255, 0, 0]      # Azul
+    color_map[combinations["Vermelho+Verde"] > 0] = [0, 255, 255]  # Amarelo
+    color_map[combinations["Vermelho+Azul"] > 0] = [255, 0, 255]   # Magenta
+    color_map[combinations["Verde+Azul"] > 0] = [255, 255, 0]      # Ciano
+    color_map[combinations["Todas"] > 0] = [255, 255, 255]         # Branco
+
+    st.image(color_map, caption="Legenda: Vermelho, Verde, Azul, Amarelo, Magenta, Ciano, Branco", use_column_width=True, channels="BGR")
